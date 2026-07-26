@@ -18,8 +18,8 @@ AIPIPE_TOKEN = os.environ["AIPIPE_TOKEN"]
 AIPIPE_BASE_URL = os.environ.get("AIPIPE_BASE_URL", "https://aipipe.org/openai/v1")
 AIPIPE_MODEL = os.environ.get("AIPIPE_MODEL", "gpt-4o-mini")
 
-MAX_STEPS = 8
-PYTHON_EXEC_TIMEOUT = 45  # seconds — hard wall-clock cap per python_exec call
+MAX_STEPS = 6
+PYTHON_EXEC_TIMEOUT = 30  # seconds — hard wall-clock cap per python_exec call
 
 # Dedicated thread pool so a hung/slow python_exec call (e.g. a stalled download)
 # never blocks the single-worker asyncio event loop that also has to accept new
@@ -191,7 +191,7 @@ def _unwrap_double_wrap(value):
 
 
 async def call_aipipe(messages):
-    async with httpx.AsyncClient(timeout=120) as client:
+    async with httpx.AsyncClient(timeout=45) as client:
         r = await client.post(
             f"{AIPIPE_BASE_URL}/chat/completions",
             headers={"Authorization": f"Bearer {AIPIPE_TOKEN}"},

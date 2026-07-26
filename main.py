@@ -16,6 +16,7 @@ Optional:
     GITHUB_LOG_PATH   (default logs/run.jsonl)
     GITHUB_BRANCH     (default main)
 """
+import asyncio
 import json
 import os
 
@@ -33,6 +34,8 @@ app = FastAPI()
 # in-memory per-chat state: {chat_id: {"history": [...], "ns": {...}}}
 CHATS: dict = {}
 MAX_HISTORY = 30
+OVERALL_TURN_TIMEOUT = 120  # seconds — hard cap on one full agent turn, so a reply is
+                             # always sent well within Telegram's/the grader's patience
 
 
 @app.get("/")
@@ -58,7 +61,12 @@ async def handle_message(chat_id: int, text: str):
     log_event({"chat_id": chat_id, "role": "user", "content": text})
 
     try:
-        reply = await run_turn(chat_id, state["history"], state["ns"])
+        reply = await asyncio.wait_for(
+            run_turn(chat_id, state["history"], state["ns"]), timeout=OVERALL_TURN_TIMEOUT
+        )
+    except asyncio.TimeoutError:
+        reply = json.dumps({"error": "turn_timeout", "log_url": ""})
+        log_event({"chat_id": chat_id, "role": "error", "content": "overall turn timeout"})
     except Exception as e:
         reply = json.dumps({"error": f"{type(e).__name__}: {e}"})
         log_event({"chat_id": chat_id, "role": "error", "content": str(e)})
@@ -67,5 +75,11 @@ async def handle_message(chat_id: int, text: str):
     state["history"][:] = state["history"][-MAX_HISTORY:]
     log_event({"chat_id": chat_id, "role": "assistant", "content": reply})
 
-    async with httpx.AsyncClient(timeout=30) as client:
-        await client.post(f"{TELEGRAM_API}/sendMessage", json={"chat_id": chat_id, "text": reply})
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            r = await client.post(f"{TELEGRAM_API}/sendMessage", json={"chat_id": chat_id, "text": reply})
+            if r.status_code != 200:
+                log_event({"chat_id": chat_id, "role": "error",
+                           "content": f"sendMessage failed {r.status_code}: {r.text[:300]}"})
+    except Exception as e:
+        log_event({"chat_id": chat_id, "role": "error", "content": f"sendMessage exception: {e}"})
