@@ -276,10 +276,18 @@ async def run_turn(chat_id, history, ns, max_steps: int = MAX_STEPS) -> str:
         fallback_messages = messages + [{
             "role": "user",
             "content": (
-                "You've run out of steps to fetch/compute real data. Based on everything "
-                "tried so far and your general knowledge, give your single best-guess answer "
-                "now. Respond with ONLY the JSON value for the answer payload (no wrapper, "
-                "no explanation) — e.g. '{\"state\": \"...\"}'."
+                "You've run out of steps to fetch/compute real data. Give your single "
+                "best-guess answer now, from general knowledge.\n\n"
+                f"The original request was: {last_user}\n\n"
+                "STRICT rules for this guess:\n"
+                "- Match the exact key(s) and value TYPE the original request asked for "
+                "(a bare name, a number, a short string — whatever it specified).\n"
+                "- The value itself must be SHORT and DIRECT — e.g. just \"Uttar Pradesh\", "
+                "not a sentence explaining your reasoning. No hedging phrases like "
+                "'typically', 'most frequently reported', 'based on trends', etc.\n"
+                "- Do not explain your answer or add caveats anywhere in the value.\n"
+                "- Respond with ONLY the JSON value for the answer payload (no outer "
+                "{\"answer\":...,\"log_url\":...} wrapper) — e.g. '{\"state\": \"Uttar Pradesh\"}'."
             ),
         }]
         try:
