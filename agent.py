@@ -2,7 +2,8 @@
 two tools — python_exec (fetch/compute) and final_answer (submit). Every
 tool call and model step is logged as JSONL via gcs_logger.log_event.
 """
-import contextlib
+import asyncio
+import concurrent.futures
 import io
 import json
 import os
@@ -18,6 +19,12 @@ AIPIPE_BASE_URL = os.environ.get("AIPIPE_BASE_URL", "https://aipipe.org/openai/v
 AIPIPE_MODEL = os.environ.get("AIPIPE_MODEL", "gpt-4o-mini")
 
 MAX_STEPS = 8
+PYTHON_EXEC_TIMEOUT = 45  # seconds — hard wall-clock cap per python_exec call
+
+# Dedicated thread pool so a hung/slow python_exec call (e.g. a stalled download)
+# never blocks the single-worker asyncio event loop that also has to accept new
+# incoming Telegram webhook requests.
+_EXEC_POOL = concurrent.futures.ThreadPoolExecutor(max_workers=4)
 MAX_TOOL_OUTPUT = 4000
 
 SYSTEM_PROMPT = """You are a data-analyst agent replying inside a Telegram chat, as part of an \
@@ -96,17 +103,51 @@ FINAL_ANSWER_TOOL = {
 TOOLS = [PYTHON_EXEC_TOOL, FINAL_ANSWER_TOOL]
 
 
+class _RequestsWithDefaultTimeout:
+    """Thin wrapper around `requests` that defaults timeout=20s on get/post/request
+    calls if the model doesn't specify one — a hard backstop against indefinite hangs."""
+    _DEFAULT_TIMEOUT = 20
+
+    def __init__(self, real_requests):
+        self._real = real_requests
+
+    def __getattr__(self, name):
+        return getattr(self._real, name)
+
+    def get(self, *args, **kwargs):
+        kwargs.setdefault("timeout", self._DEFAULT_TIMEOUT)
+        return self._real.get(*args, **kwargs)
+
+    def post(self, *args, **kwargs):
+        kwargs.setdefault("timeout", self._DEFAULT_TIMEOUT)
+        return self._real.post(*args, **kwargs)
+
+    def request(self, *args, **kwargs):
+        kwargs.setdefault("timeout", self._DEFAULT_TIMEOUT)
+        return self._real.request(*args, **kwargs)
+
+
 def exec_python(code: str, ns: dict) -> str:
     for name in ("requests", "pandas", "numpy", "json", "re", "math", "statistics", "io", "pdfplumber"):
         if name not in ns:
             try:
-                ns[name] = __import__(name)
+                mod = __import__(name)
+                if name == "requests":
+                    mod = _RequestsWithDefaultTimeout(mod)
+                ns[name] = mod
             except ImportError:
                 pass
+
     buf = io.StringIO()
+
+    def _print(*args, **kwargs):
+        kwargs.pop("file", None)
+        print(*args, file=buf, **kwargs)
+
+    ns["print"] = _print  # thread-safe: doesn't touch the process-global sys.stdout
+
     try:
-        with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
-            exec(code, ns)
+        exec(code, ns)
     except Exception:
         buf.write("\n" + traceback.format_exc())
     out = buf.getvalue()
@@ -199,7 +240,18 @@ async def run_turn(chat_id, history, ns, max_steps: int = MAX_STEPS) -> str:
 
             elif fn == "python_exec":
                 code = args.get("code", "")
-                result = exec_python(code, ns)
+                loop = asyncio.get_running_loop()
+                try:
+                    result = await asyncio.wait_for(
+                        loop.run_in_executor(_EXEC_POOL, exec_python, code, ns),
+                        timeout=PYTHON_EXEC_TIMEOUT,
+                    )
+                except asyncio.TimeoutError:
+                    result = (
+                        f"TIMEOUT: code did not finish within {PYTHON_EXEC_TIMEOUT}s "
+                        "(likely a slow/hung network request — try a smaller request, "
+                        "add timeout=15 to requests calls, or try a different source)."
+                    )
                 log_event({"chat_id": chat_id, "role": "tool", "tool": "python_exec", "code": code, "result": result})
                 messages.append({"role": "tool", "tool_call_id": tc["id"], "content": result or "(no output)"})
 
