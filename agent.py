@@ -29,19 +29,33 @@ and do NOT output JSON yet.
 
 2. A final request that explicitly says something like "Reply with ONLY ... JSON object ...". \
 When you see this, you MUST actually solve the task first (use the python_exec tool to fetch \
-data with `requests`, load/clean it with `pandas`/`numpy`, and compute the real answer — never \
-guess or fabricate numbers), then call the final_answer tool with the computed value.
+data with `requests`, load/clean it with `pandas`/`numpy`, and compute the real answer), then \
+call the final_answer tool with the computed value.
+
+NEVER invent, simulate, or guess data values to answer with. If a source is a PDF, download it \
+with `requests.get(url).content` then extract its text/tables with `pdfplumber` \
+(`pdfplumber.open(io.BytesIO(resp.content))`, then `.pages[i].extract_text()` or `.extract_table()`). \
+If a source is an Excel/CSV file, use `pandas.read_excel(io.BytesIO(resp.content))` or \
+`pandas.read_csv(io.BytesIO(resp.content))`. If a source is an HTML page, use \
+`pandas.read_html(resp.text)` or parse with `requests` + regex/string search on `resp.text`. \
+Try multiple approaches and multiple candidate URLs before giving up. Only if every real avenue \
+is genuinely exhausted (e.g. you truly cannot reach the source after several attempts) should you \
+fall back to your best general knowledge — and even then, do not invent fabricated numeric tables; \
+give your single best real-world estimate instead of a made-up dataset.
 
 Rules for final_answer:
-- Call it with `value` = a JSON-encoded STRING of just the answer payload requested inside the \
+- Call it with `value` = a JSON-encoded STRING of ONLY the answer payload requested inside the \
 message (e.g. '{"state": "Assam"}' or '[1, 2, 3]' or '"42"'). Do NOT include an outer \
-{"answer":..., "log_url":...} wrapper yourself — that is added automatically by the system.
+{"answer":..., "log_url":...} wrapper yourself, even if the user's message shows that wrapper as \
+part of the example shape — that wrapper is added automatically by the system. If the message says \
+'Reply with ONLY {"answer": {"state": "X"}, "log_url": "..."}', your `value` should be just \
+'{"state": "X"}' — nothing about "answer" or "log_url" belongs in what you pass.
 - The value must match the exact shape/keys the message asked for, nothing extra.
 - Only call final_answer once, only when the current message is the "reply with ONLY" request.
 
-The python_exec tool runs Python with requests/pandas/numpy/json/re/math/statistics pre-imported, \
-persistent across calls in this conversation (reuse variables). Use print() to see output. \
-Prefer real computation over assumptions — fetch and inspect data before answering.
+The python_exec tool runs Python with requests/pandas/numpy/pdfplumber/json/re/math/statistics/io \
+pre-imported, persistent across calls in this conversation (reuse variables). Use print() to see \
+output. Always prefer real computation over assumptions — fetch and inspect data before answering.
 """
 
 PYTHON_EXEC_TOOL = {
@@ -49,8 +63,9 @@ PYTHON_EXEC_TOOL = {
     "function": {
         "name": "python_exec",
         "description": (
-            "Execute Python code to fetch data (requests), analyze it (pandas/numpy), and "
-            "compute results. State persists across calls within this conversation."
+            "Execute Python code to fetch data (requests), extract PDFs (pdfplumber) or "
+            "Excel/CSV (pandas), analyze it (pandas/numpy), and compute results. State "
+            "persists across calls within this conversation."
         ),
         "parameters": {
             "type": "object",
@@ -82,7 +97,7 @@ TOOLS = [PYTHON_EXEC_TOOL, FINAL_ANSWER_TOOL]
 
 
 def exec_python(code: str, ns: dict) -> str:
-    for name in ("requests", "pandas", "numpy", "json", "re", "math", "statistics"):
+    for name in ("requests", "pandas", "numpy", "json", "re", "math", "statistics", "io", "pdfplumber"):
         if name not in ns:
             try:
                 ns[name] = __import__(name)
@@ -126,6 +141,14 @@ def _coerce_value(raw: str):
     return cleaned  # give up, send raw string
 
 
+def _unwrap_double_wrap(value):
+    """If the model ignored instructions and wrapped its own {"answer":..., "log_url":...}
+    around the payload, unwrap it so we don't nest it again."""
+    if isinstance(value, dict) and set(value.keys()) == {"answer", "log_url"}:
+        return value["answer"]
+    return value
+
+
 async def call_aipipe(messages):
     async with httpx.AsyncClient(timeout=120) as client:
         r = await client.post(
@@ -158,7 +181,7 @@ async def run_turn(chat_id, history, ns, max_steps: int = MAX_STEPS) -> str:
             if not is_final_turn:
                 return text[:300] or "On it."
             # model answered without calling final_answer — salvage what we can
-            value = _coerce_value(text)
+            value = _unwrap_double_wrap(_coerce_value(text))
             return json.dumps({"answer": value, "log_url": public_log_url() or ""})
 
         messages.append(choice)
@@ -170,7 +193,7 @@ async def run_turn(chat_id, history, ns, max_steps: int = MAX_STEPS) -> str:
                 args = {}
 
             if fn == "final_answer":
-                value = _coerce_value(str(args.get("value", "")))
+                value = _unwrap_double_wrap(_coerce_value(str(args.get("value", ""))))
                 log_event({"chat_id": chat_id, "role": "final_answer", "value": value})
                 return json.dumps({"answer": value, "log_url": public_log_url() or ""})
 
