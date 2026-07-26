@@ -34,8 +34,8 @@ app = FastAPI()
 # in-memory per-chat state: {chat_id: {"history": [...], "ns": {...}}}
 CHATS: dict = {}
 MAX_HISTORY = 30
-OVERALL_TURN_TIMEOUT = 120  # seconds — hard cap on one full agent turn, so a reply is
-                             # always sent well within Telegram's/the grader's patience
+OVERALL_TURN_TIMEOUT = 150  # seconds — hard cap on one full agent turn (leaves room for a
+                             # forced best-guess fallback call if real attempts are exhausted)
 
 
 @app.get("/")
