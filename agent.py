@@ -203,7 +203,16 @@ def exec_python(code: str, ns: dict) -> str:
 
 def wants_final_json(text: str) -> bool:
     t = text.lower()
-    return "reply with only" in t or "reply with exactly" in t or ("only" in t and "json" in t)
+    if "reply with only" in t or "reply with exactly" in t or ("only" in t and "json" in t):
+        return True
+    # Fallback: the message contains a JSON-shaped example (braces + a quoted key) —
+    # a strong signal it's specifying the exact answer shape, even if it doesn't use
+    # the literal "reply with only" phrasing. Real grading messages aren't guaranteed
+    # to use that exact wording, per the spec's "each message spells out the exact
+    # JSON shape it wants".
+    if re.search(r'\{\s*"[^"]+"\s*:', text):
+        return True
+    return False
 
 
 def _strip_fences(text: str) -> str:
