@@ -3,6 +3,7 @@ two tools — python_exec (fetch/compute) and final_answer (submit). Every
 tool call and model step is logged as JSONL via gcs_logger.log_event.
 """
 import asyncio
+import ast
 import concurrent.futures
 import io
 import json
@@ -147,7 +148,19 @@ def exec_python(code: str, ns: dict) -> str:
     ns["print"] = _print  # thread-safe: doesn't touch the process-global sys.stdout
 
     try:
-        exec(code, ns)
+        tree = ast.parse(code, mode="exec")
+        # REPL-style auto-display: if the code ends in a bare expression (not an
+        # assignment/statement), capture and print its value even without an
+        # explicit print() call — mirrors what a human testing in a REPL would see.
+        last_expr_code = None
+        if tree.body and isinstance(tree.body[-1], ast.Expr):
+            last_expr_node = tree.body.pop()
+            last_expr_code = compile(ast.Expression(last_expr_node.value), "<exec_python>", "eval")
+        exec(compile(tree, "<exec_python>", "exec"), ns)
+        if last_expr_code is not None:
+            result = eval(last_expr_code, ns)
+            if result is not None:
+                _print(result)
     except Exception:
         buf.write("\n" + traceback.format_exc())
     out = buf.getvalue()
