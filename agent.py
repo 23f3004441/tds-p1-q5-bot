@@ -11,7 +11,9 @@ import os
 import re
 import traceback
 
+import bs4
 import httpx
+import requests as _requests_module
 
 from github_logger import log_event, public_log_url
 
@@ -40,16 +42,20 @@ When you see this, you MUST actually solve the task first (use the python_exec t
 data with `requests`, load/clean it with `pandas`/`numpy`, and compute the real answer), then \
 call the final_answer tool with the computed value.
 
-NEVER invent, simulate, or guess data values to answer with. If a source is a PDF, download it \
-with `requests.get(url).content` then extract its text/tables with `pdfplumber` \
-(`pdfplumber.open(io.BytesIO(resp.content))`, then `.pages[i].extract_text()` or `.extract_table()`). \
-If a source is an Excel/CSV file, use `pandas.read_excel(io.BytesIO(resp.content))` or \
-`pandas.read_csv(io.BytesIO(resp.content))`. If a source is an HTML page, use \
+NEVER invent, simulate, or guess data values to answer with. NEVER guess a specific file URL from \
+memory (e.g. a MOSPI/government report path) — those change often and a wrong guess frequently \
+returns an HTML error page disguised as a "successful" 200 response, wasting steps. Instead, call \
+`web_search("your query")` FIRST to find the real, current URL for a source, then fetch that URL. \
+If a source is a PDF, download it with `requests.get(url).content` then extract its text/tables \
+with `pdfplumber` (`pdfplumber.open(io.BytesIO(resp.content))`, then `.pages[i].extract_text()` or \
+`.extract_table()`). If a source is an Excel/CSV file, use `pandas.read_excel(io.BytesIO(resp.content))` \
+or `pandas.read_csv(io.BytesIO(resp.content))`. If a source is an HTML page, use \
 `pandas.read_html(resp.text)` or parse with `requests` + regex/string search on `resp.text`. \
-Try multiple approaches and multiple candidate URLs before giving up. Only if every real avenue \
-is genuinely exhausted (e.g. you truly cannot reach the source after several attempts) should you \
-fall back to your best general knowledge — and even then, do not invent fabricated numeric tables; \
-give your single best real-world estimate instead of a made-up dataset.
+Try multiple approaches — search again with different terms, try alternate candidate URLs from the \
+search results — before giving up. Only if every real avenue is genuinely exhausted (e.g. you \
+truly cannot reach the source after several attempts) should you fall back to your best general \
+knowledge — and even then, do not invent fabricated numeric tables; give your single best \
+real-world estimate instead of a made-up dataset.
 
 Rules for final_answer:
 - Call it with `value` = a JSON-encoded STRING of ONLY the answer payload requested inside the \
@@ -62,8 +68,10 @@ part of the example shape — that wrapper is added automatically by the system.
 - Only call final_answer once, only when the current message is the "reply with ONLY" request.
 
 The python_exec tool runs Python with requests/pandas/numpy/pdfplumber/json/re/math/statistics/io \
-pre-imported, persistent across calls in this conversation (reuse variables). Use print() to see \
-output. Always prefer real computation over assumptions — fetch and inspect data before answering.
+pre-imported, persistent across calls in this conversation (reuse variables), plus a `web_search(query)` \
+function for finding real current URLs (use this before guessing any specific file path). Use print() \
+or a bare trailing expression to see output. Always prefer real computation over assumptions — \
+search, fetch, and inspect data before answering.
 """
 
 PYTHON_EXEC_TOOL = {
@@ -71,9 +79,10 @@ PYTHON_EXEC_TOOL = {
     "function": {
         "name": "python_exec",
         "description": (
-            "Execute Python code to fetch data (requests), extract PDFs (pdfplumber) or "
-            "Excel/CSV (pandas), analyze it (pandas/numpy), and compute results. State "
-            "persists across calls within this conversation."
+            "Execute Python code with requests/pandas/numpy/pdfplumber/web_search available. "
+            "Use web_search(query) to find real current URLs (don't guess file paths), fetch "
+            "data, extract PDFs/Excel/CSV/HTML, and compute results. State persists across "
+            "calls within this conversation."
         ),
         "parameters": {
             "type": "object",
@@ -128,6 +137,30 @@ class _RequestsWithDefaultTimeout:
         return self._real.request(*args, **kwargs)
 
 
+def web_search(query: str, max_results: int = 5) -> str:
+    """Lightweight web search via DuckDuckGo's HTML endpoint (no API key needed).
+    Returns 'title -- url' lines, one per result. Use this to FIND the real, current
+    URL for a source instead of guessing one — guessed government/dataset URLs are
+    very often wrong (e.g. produce a soft-404 HTML page instead of a real file)."""
+    try:
+        resp = _requests_module.post(
+            "https://html.duckduckgo.com/html/",
+            data={"q": query},
+            headers={"User-Agent": "Mozilla/5.0 (compatible; data-analyst-bot/1.0)"},
+            timeout=15,
+        )
+        soup = bs4.BeautifulSoup(resp.text, "html.parser")
+        results = []
+        for a in soup.select("a.result__a")[:max_results]:
+            title = a.get_text(strip=True)
+            href = a.get("href", "")
+            if title and href:
+                results.append(f"{title} -- {href}")
+        return "\n".join(results) if results else "No results found."
+    except Exception as e:
+        return f"search error: {type(e).__name__}: {e}"
+
+
 def exec_python(code: str, ns: dict) -> str:
     for name in ("requests", "pandas", "numpy", "json", "re", "math", "statistics", "io", "pdfplumber"):
         if name not in ns:
@@ -138,6 +171,7 @@ def exec_python(code: str, ns: dict) -> str:
                 ns[name] = mod
             except ImportError:
                 pass
+    ns.setdefault("web_search", web_search)
 
     buf = io.StringIO()
 
